@@ -1,11 +1,5 @@
 import { io } from 'socket.io-client';
-
-const SOCKET_URL =
-  import.meta.env.VITE_SOCKET_URL !== undefined && import.meta.env.VITE_SOCKET_URL !== ''
-    ? import.meta.env.VITE_SOCKET_URL
-    : import.meta.env.DEV
-      ? window.location.origin
-      : 'https://kolchatbackend.onrender.com';
+import { SOCKET_URL } from './config';
 
 let socket = null;
 
