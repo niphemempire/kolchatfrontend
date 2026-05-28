@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Navbar from './components/Navbar';
 import KOLBottomTab from './components/KOLBottomTab';
 import KOLHero from './components/KOLHero';
@@ -10,10 +10,30 @@ import { apiFetch } from './utils/api';
 import { connectSocket, disconnectSocket } from './utils/socket';
 
 export default function App() {
-  const [view, setView] = useState('landing');
+  const [view, setView] = useState('loading');   // start with loading while we check session
   const [activeTab, setActiveTab] = useState('chat');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [selectedProfile, setSelectedProfile] = useState(null);
+
+  // On mount, check if the user already has a valid session cookie
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/auth/me')
+      .then(() => {
+        if (cancelled) return;
+        // Cookie is still valid — restore logged-in state
+        connectSocket();
+        setIsLoggedIn(true);
+        setView('app');
+        setActiveTab('chat');
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // No valid session — show landing page
+        setView('landing');
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const handleConnect = () => {
     if (isLoggedIn) {
@@ -56,6 +76,12 @@ export default function App() {
       />
 
       <main className={`flex flex-col ${view === 'app' ? 'flex-1 overflow-hidden' : 'flex-grow'}`}>
+        {view === 'loading' && (
+          <div className="flex-grow flex items-center justify-center">
+            <div className="animate-spin rounded-full h-10 w-10 border-4 border-slate-200 border-t-brand-secondary"></div>
+          </div>
+        )}
+
         {view === 'landing' && <KOLHero onConnectClick={handleConnect} />}
         
         {view === 'login' && <AppLogin onLoginSuccess={handleLoginSuccess} onBack={() => setView('landing')} />}
