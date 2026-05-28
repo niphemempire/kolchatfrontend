@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Search as SearchIcon, 
-  Settings as SettingsIcon, 
-  Video as VideoIcon, 
-  Phone, 
-  Plus, 
-  Smile, 
-  Send as SendIcon, 
+import {
+  Search as SearchIcon,
+  Settings as SettingsIcon,
+  Video as VideoIcon,
+  Phone,
+  Plus,
+  Smile,
+  Send as SendIcon,
   CheckCheck,
   ArrowLeft,
   X as CloseIcon,
@@ -53,6 +53,7 @@ export default function KOLChatRoom({ onSettingsClick }) {
   const [currentUser, setCurrentUser] = useState(null);
   const [typingUserId, setTypingUserId] = useState(null);
   const [socketConnected, setSocketConnected] = useState(false);
+  const [onlineUsers, setOnlineUsers] = useState(new Set());
 
   const fileInputRef = useRef(null);
   const messageInputRef = useRef(null);
@@ -119,7 +120,7 @@ export default function KOLChatRoom({ onSettingsClick }) {
     const refreshMe = () => {
       apiFetch('/api/auth/me')
         .then((data) => setCurrentUser(toProfileView(data, DEFAULT_AVATAR)))
-        .catch(() => {});
+        .catch(() => { });
     };
     refreshMe();
     fetchConversations();
@@ -129,8 +130,29 @@ export default function KOLChatRoom({ onSettingsClick }) {
     const onConnect = () => {
       setSocketConnected(true);
       fetchConversations();
+      // Request the current online users list on (re)connect
+      socket.emit('user:getOnlineUsers');
     };
     const onDisconnect = () => setSocketConnected(false);
+
+    // Real-time online status handlers
+    const onOnlineUsers = ({ userIds }) => {
+      setOnlineUsers(new Set(userIds.map(String)));
+    };
+    const onUserOnline = ({ userId }) => {
+      setOnlineUsers((prev) => {
+        const next = new Set(prev);
+        next.add(String(userId));
+        return next;
+      });
+    };
+    const onUserOffline = ({ userId }) => {
+      setOnlineUsers((prev) => {
+        const next = new Set(prev);
+        next.delete(String(userId));
+        return next;
+      });
+    };
 
     const onNewMessage = (msg) => appendSocketMessage(msg);
     const onConversationUpdated = () => fetchConversations();
@@ -171,6 +193,9 @@ export default function KOLChatRoom({ onSettingsClick }) {
     socket.on('messagesRead', onMessagesRead);
     socket.on('messageUpdated', onMessageUpdated);
     socket.on('messageDeleted', onMessageDeleted);
+    socket.on('user:onlineUsers', onOnlineUsers);
+    socket.on('user:online', onUserOnline);
+    socket.on('user:offline', onUserOffline);
 
     if (socket.connected) onConnect();
 
@@ -182,6 +207,14 @@ export default function KOLChatRoom({ onSettingsClick }) {
       if (document.visibilityState === 'visible') {
         refreshMe();
         fetchConversations();
+        // Re-request online list when the tab regains focus
+        const s = getSocket();
+        if (s?.connected) s.emit('user:getOnlineUsers');
+
+        // If actively viewing a chat, fetch messages silently to clear any unread status on the backend
+        if (selectedUserRef.current) {
+          fetchMessages(selectedUserRef.current, { silent: true });
+        }
       }
     };
     window.addEventListener('focus', refreshOnFocus);
@@ -200,6 +233,9 @@ export default function KOLChatRoom({ onSettingsClick }) {
       socket.off('messagesRead', onMessagesRead);
       socket.off('messageUpdated', onMessageUpdated);
       socket.off('messageDeleted', onMessageDeleted);
+      socket.off('user:onlineUsers', onOnlineUsers);
+      socket.off('user:online', onUserOnline);
+      socket.off('user:offline', onUserOffline);
     };
   }, []);
 
@@ -210,12 +246,12 @@ export default function KOLChatRoom({ onSettingsClick }) {
       list.map((c) =>
         c._id === userId
           ? {
-              ...c,
-              lastMessage: preview,
-              lastMessageAt: now,
-              isDraft: false,
-              unread: fromMe ? 0 : c.unread,
-            }
+            ...c,
+            lastMessage: preview,
+            lastMessageAt: now,
+            isDraft: false,
+            unread: fromMe ? 0 : c.unread,
+          }
           : c
       );
 
@@ -254,7 +290,8 @@ export default function KOLChatRoom({ onSettingsClick }) {
     if (!fromMe) {
       const viewing =
         selectedUserRef.current &&
-        String(selectedUserRef.current._id) === chatId;
+        String(selectedUserRef.current._id) === chatId &&
+        document.visibilityState === 'visible';
       if (!viewing) {
         setConversations((prev) =>
           sortConversations(
@@ -263,6 +300,11 @@ export default function KOLChatRoom({ onSettingsClick }) {
             )
           )
         );
+      } else {
+        const s = getSocket();
+        if (s?.connected && !msg.read) {
+          s.emit('message:markRead', { messageId: msg._id });
+        }
       }
     }
   };
@@ -589,14 +631,18 @@ export default function KOLChatRoom({ onSettingsClick }) {
   const isPartnerTyping =
     selectedUser && typingUserId && String(typingUserId) === String(selectedUser._id);
 
+  const isPartnerOnline = selectedUser && onlineUsers.has(String(selectedUser._id));
+
   const currentChat = selectedUser ? {
     avatar: selectedUser.avatar || selectedUser.profilePicture || DEFAULT_AVATAR,
     name: getDisplayName(selectedUser),
-    status: isPartnerTyping ? 'typing…' : socketConnected ? 'Online' : 'Connecting…',
+    status: isPartnerTyping ? 'typing…' : isPartnerOnline ? 'Online' : 'Offline',
+    online: isPartnerOnline,
   } : {
     avatar: DEFAULT_AVATAR,
     name: 'Select a user',
     status: 'Start a chat from search',
+    online: false,
   };
 
   const currentMessages = selectedUser ? messages[selectedUser._id] || [] : [];
@@ -607,11 +653,10 @@ export default function KOLChatRoom({ onSettingsClick }) {
     <div
       key={chat._id}
       onClick={() => handleSelectUser(chat)}
-      className={`flex items-center gap-4 p-4 cursor-pointer transition-all border-b border-slate-100/50 ${
-        selectedUser?._id === chat._id
-          ? 'bg-white shadow-sm border-l-4 border-l-brand-secondary'
-          : 'hover:bg-slate-100/50'
-      }`}
+      className={`flex items-center gap-4 p-4 cursor-pointer transition-all border-b border-slate-100/50 ${selectedUser?._id === chat._id
+        ? 'bg-white shadow-sm border-l-4 border-l-brand-secondary'
+        : 'hover:bg-slate-100/50'
+        }`}
     >
       <div className="relative flex-shrink-0">
         <img
@@ -619,7 +664,7 @@ export default function KOLChatRoom({ onSettingsClick }) {
           alt={chat.username}
           className="w-14 h-14 rounded-full bg-slate-200 border-2 border-white shadow-sm"
         />
-        {chat.online && (
+        {onlineUsers.has(String(chat._id)) && (
           <div className="absolute bottom-0.5 right-0.5 w-3.5 h-3.5 bg-green-500 border-2 border-white rounded-full" />
         )}
       </div>
@@ -648,10 +693,10 @@ export default function KOLChatRoom({ onSettingsClick }) {
 
   return (
     <div className="flex flex-1 overflow-hidden h-full pb-20 md:pb-0">
-      <input 
-        type="file" 
-        ref={fileInputRef} 
-        className="hidden" 
+      <input
+        type="file"
+        ref={fileInputRef}
+        className="hidden"
         onChange={handleFileChange}
         accept="image/*,video/*,.pdf,.doc,.docx,.txt"
       />
@@ -660,7 +705,7 @@ export default function KOLChatRoom({ onSettingsClick }) {
         <div className="p-4 flex items-center gap-3">
           <div className="relative flex-1">
             <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input 
+            <input
               className="w-full pl-10 pr-4 py-2 bg-white rounded-xl border-none font-medium shadow-sm outline-none focus:ring-2 focus:ring-brand-secondary/20 transition-all placeholder:text-slate-400"
               placeholder="Search conversations..."
               type="text"
@@ -668,7 +713,7 @@ export default function KOLChatRoom({ onSettingsClick }) {
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
-          <button 
+          <button
             onClick={() => openProfile(currentUser)}
             className="w-10 h-10 rounded-full overflow-hidden border border-slate-200 active:scale-95 transition-transform"
           >
@@ -729,7 +774,7 @@ export default function KOLChatRoom({ onSettingsClick }) {
         {/* Header */}
         <header className="h-16 px-4 md:px-6 bg-white/70 backdrop-blur-md border-b border-slate-200/50 flex items-center justify-between sticky top-0 z-10">
           <div className="flex items-center gap-3">
-            <button 
+            <button
               onClick={() => setIsMobileChatOpen(false)}
               className="md:hidden p-2 -ml-2 text-slate-500 hover:bg-slate-100 rounded-full transition-colors"
             >
@@ -737,16 +782,15 @@ export default function KOLChatRoom({ onSettingsClick }) {
             </button>
             <div className="relative">
               <img src={currentChat.avatar} alt="" className="w-10 h-10 rounded-full bg-slate-200" />
-              {selectedUser && (
+              {selectedUser && currentChat.online && (
                 <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-green-500 border-2 border-white rounded-full" />
               )}
             </div>
             <div className="min-w-0 flex-1">
               <h2 className="text-sm font-bold text-brand-primary truncate max-w-[150px] md:max-w-none leading-tight">{currentChat.name}</h2>
               <span
-                className={`text-[11px] font-medium truncate ${
-                  isPartnerTyping ? 'text-brand-secondary animate-pulse' : 'text-slate-400'
-                }`}
+                className={`text-[11px] font-medium truncate ${isPartnerTyping ? 'text-brand-secondary animate-pulse' : 'text-slate-400'
+                  }`}
               >
                 {currentChat.status}
               </span>
@@ -756,9 +800,9 @@ export default function KOLChatRoom({ onSettingsClick }) {
             <VideoIcon className="w-5 h-5 text-slate-400 hover:text-brand-secondary transition-colors cursor-pointer" />
             <Phone className="w-5 h-5 text-slate-400 hover:text-brand-secondary transition-colors cursor-pointer" />
             <div className="w-[1px] h-6 bg-slate-200" />
-            <SettingsIcon 
+            <SettingsIcon
               onClick={() => openProfile(selectedUser)}
-              className="w-5 h-5 text-slate-400 hover:text-brand-secondary transition-colors cursor-pointer" 
+              className="w-5 h-5 text-slate-400 hover:text-brand-secondary transition-colors cursor-pointer"
             />
           </div>
         </header>
@@ -796,9 +840,8 @@ export default function KOLChatRoom({ onSettingsClick }) {
                       setActiveMessageActions(msg);
                     }
                   }}
-                  className={`flex w-full gap-2 animate-in fade-in slide-in-from-bottom-2 duration-300 ${
-                    msg.sender === 'me' ? 'justify-end' : 'justify-start'
-                  }`}
+                  className={`flex w-full gap-2 animate-in fade-in slide-in-from-bottom-2 duration-300 ${msg.sender === 'me' ? 'justify-end' : 'justify-start'
+                    }`}
                 >
                   {msg.sender === 'them' && (
                     <img
@@ -808,16 +851,14 @@ export default function KOLChatRoom({ onSettingsClick }) {
                     />
                   )}
                   <div
-                    className={`flex flex-col max-w-[85%] md:max-w-[75%] ${
-                      msg.sender === 'me' ? 'items-end' : 'items-start'
-                    }`}
+                    className={`flex flex-col max-w-[85%] md:max-w-[75%] ${msg.sender === 'me' ? 'items-end' : 'items-start'
+                      }`}
                   >
                     <div
-                      className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${
-                        msg.sender === 'me'
-                          ? 'bg-brand-primary text-white rounded-br-sm'
-                          : 'bg-white border border-slate-200/80 text-brand-on-surface rounded-bl-sm shadow-sm'
-                      } ${msg.deleted ? 'italic opacity-80' : ''}`}
+                      className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${msg.sender === 'me'
+                        ? 'bg-brand-primary text-white rounded-br-sm'
+                        : 'bg-white border border-slate-200/80 text-brand-on-surface rounded-bl-sm shadow-sm'
+                        } ${msg.deleted ? 'italic opacity-80' : ''}`}
                     >
                       {msg.message && <p>{msg.message}</p>}
                       {msg.file && (
@@ -848,16 +889,14 @@ export default function KOLChatRoom({ onSettingsClick }) {
                       )}
                     </div>
                     <div
-                      className={`flex items-center gap-1 mt-1 ${
-                        msg.sender === 'me' ? 'flex-row-reverse' : ''
-                      }`}
+                      className={`flex items-center gap-1 mt-1 ${msg.sender === 'me' ? 'flex-row-reverse' : ''
+                        }`}
                     >
                       <span className="text-[10px] text-slate-400">{msg.time}</span>
                       {msg.sender === 'me' && !msg.deleted && (
                         <CheckCheck
-                          className={`w-3.5 h-3.5 shrink-0 ${
-                            msg.read ? 'text-sky-500' : 'text-slate-400'
-                          }`}
+                          className={`w-3.5 h-3.5 shrink-0 ${msg.read ? 'text-sky-500' : 'text-slate-400'
+                            }`}
                           aria-label={msg.read ? 'Read' : 'Delivered'}
                         />
                       )}
@@ -941,7 +980,7 @@ export default function KOLChatRoom({ onSettingsClick }) {
                   <p className="text-sm font-bold truncate text-slate-800">{pendingFile.name}</p>
                   <p className="text-[10px] text-slate-500 uppercase">{pendingFile.size} • {pendingFile.type.split('/')[1]}</p>
                 </div>
-                <button 
+                <button
                   onClick={() => setPendingFile(null)}
                   className="w-8 h-8 rounded-full bg-slate-100 text-slate-500 hover:text-brand-error flex items-center justify-center transition-colors"
                 >
@@ -951,7 +990,7 @@ export default function KOLChatRoom({ onSettingsClick }) {
             )}
 
             <div className="relative flex items-end gap-2 md:gap-3 bg-white/70 backdrop-blur-md rounded-2xl px-3 md:px-4 py-2 shadow-lg border border-slate-200/50 focus-within:border-brand-secondary/50 transition-all duration-300">
-              <button 
+              <button
                 onClick={() => fileInputRef.current?.click()}
                 className="p-2 mb-0.5 text-slate-400 hover:text-brand-secondary transition-colors shrink-0"
               >
@@ -972,7 +1011,7 @@ export default function KOLChatRoom({ onSettingsClick }) {
                 <button className="p-2 text-slate-400 hover:text-brand-secondary transition-colors hidden sm:block">
                   <Smile className="w-5 h-5" />
                 </button>
-                <button 
+                <button
                   onClick={handleSend}
                   disabled={!selectedUser || (!inputMessage.trim() && !pendingFile) || isSending || unauthorized}
                   className="w-10 h-10 rounded-full bg-brand-primary text-white flex items-center justify-center hover:brightness-110 active:scale-95 transition-all shrink-0 shadow-lg shadow-brand-primary/20 disabled:opacity-50 disabled:grayscale disabled:cursor-not-allowed"
@@ -987,7 +1026,7 @@ export default function KOLChatRoom({ onSettingsClick }) {
 
       {/* FAB for Mobile Settings */}
       {!isMobileChatOpen && (
-        <button 
+        <button
           onClick={() => openProfile(currentUser)}
           className="md:hidden fixed right-6 bottom-24 w-14 h-14 bg-brand-primary text-white rounded-full shadow-2xl flex items-center justify-center active:scale-95 transition-transform z-40"
         >

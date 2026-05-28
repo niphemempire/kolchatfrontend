@@ -48,7 +48,7 @@ export function mapUserToConversation(user, defaultAvatar, overrides = {}) {
     lastMessage: overrides.lastMessage ?? 'Start a conversation',
     lastMessageAt: overrides.lastMessageAt ?? new Date().toISOString(),
     unread: overrides.unread ?? 0,
-    online: overrides.online ?? true,
+    online: overrides.online ?? false,
     isDraft: overrides.isDraft ?? false,
   };
 }
